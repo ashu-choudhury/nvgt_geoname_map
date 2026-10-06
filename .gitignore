@@ -1,0 +1,12 @@
+# Rust build artifacts
+rust_core/target/
+**/target/
+Cargo.lock
+
+# Downloaded cache files for raw dataset builder
+cache/
+
+# Intermediate and build outputs
+*.tmp
+*.log
+*.zip

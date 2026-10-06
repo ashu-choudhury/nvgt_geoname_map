@@ -1,0 +1,10 @@
+[package]
+name = "rust_core"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "nvgt_geoname_map"
+crate-type = ["cdylib"]
+
+[dependencies]

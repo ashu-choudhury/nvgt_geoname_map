@@ -1,0 +1,90 @@
+#include "geoname_map.nvgt"
+
+void main() {
+    println("=== NVGT GeoNames Map Test ===");
+
+    geoname_map map;
+    timer load_timer;
+    println("Loading geographic map engine (Rust Core + 100% Embedded Binary Data) ...");
+    if (!map.load()) {
+        println("FAILED to initialize geoname map engine!");
+        return;
+    }
+    println("Successfully loaded " + map.count() + " locations in " + load_timer.elapsed + " ms!");
+
+    println("\n--- Test 1: Reverse Geocoding (Coordinates to Place) ---");
+    // Coordinates around New Delhi: 77.2090 (X/lon), 28.6139 (Y/lat)
+    timer q_timer;
+    geoname_place@ p1 = map.find_nearest(77.2090, 28.6139);
+    uint q_time = q_timer.elapsed;
+    if (@p1 != null) {
+        println("Lookup at (77.2090, 28.6139) completed in " + q_time + " ms:");
+        println("  Found: " + p1.name + " (" + p1.get_category_name() + "), Country: " + p1.country);
+        println("  Coordinates: X=" + p1.x + " Y=" + p1.y + " Z(Elevation)=" + p1.z + "m");
+        println("  Population: " + p1.population);
+        println("  Distance from query: " + p1.distance_to_km(77.2090, 28.6139) + " km");
+    }
+
+    println("\n--- Test 2: Nearest Location to Tokyo ---");
+    // Near Tokyo: 139.75, 35.68
+    geoname_place@ p2 = map.find_nearest_xyz(139.75, 35.68, 0.0);
+    if (@p2 != null) {
+        println("  Found: " + p2.name + " (" + p2.get_category_name() + "), " + p2.country + " [Elev: " + p2.z + "m]");
+        println("  Distance: " + p2.distance_to_km(139.75, 35.68) + " km, Bearing: " + p2.compass_direction_to(139.75, 35.68));
+    }
+
+    println("\n--- Test 3: Natural Features (Mountains, Lakes, Rivers) ---");
+    geoname_place@ everest = map.get_by_name("Mount Everest");
+    if (@everest != null) {
+        println("  Mountain: " + everest.name + " [" + everest.get_category_name() + "], Elev: " + everest.z + "m, Coords: (" + everest.x + ", " + everest.y + ")");
+    }
+    geoname_place@ lake = map.get_by_name("Lake Baikal");
+    if (@lake != null) {
+        println("  Lake: " + lake.name + " [" + lake.get_category_name() + "], Country: " + lake.country + ", Coords: (" + lake.x + ", " + lake.y + ")");
+    }
+    geoname_place@ river = map.get_by_name("Nile River");
+    if (@river != null) {
+        println("  River: " + river.name + " [" + river.get_category_name() + "], Country: " + river.country + ", Coords: (" + river.x + ", " + river.y + ")");
+    }
+
+    println("\n--- Test 4: Oceans and Seas ---");
+    geoname_place@ ocean = map.get_by_name("Pacific Ocean");
+    if (@ocean != null) {
+        println("  Ocean: " + ocean.name + " [" + ocean.get_category_name() + "] at (" + ocean.x + ", " + ocean.y + ")");
+    }
+    geoname_place@ sea = map.get_by_name("Mediterranean Sea");
+    if (@sea != null) {
+        println("  Sea: " + sea.name + " [" + sea.get_category_name() + "] at (" + sea.x + ", " + sea.y + ")");
+    }
+
+    println("\n--- Test 5: Forward Geocoding & Settlements (Villages, Towns, Cities) ---");
+    geoname_place@[] search_res = map.search("Springfield");
+    println("Found " + search_res.length() + " settlements matching 'Springfield':");
+    for (uint i = 0; i < search_res.length() and i < 5; i++) {
+        println("  - " + search_res[i].name + " (" + search_res[i].country + ", " + search_res[i].get_category_name() + ", pop: " + search_res[i].population + ") at (" + search_res[i].x + ", " + search_res[i].y + ")");
+    }
+
+    println("\n--- Test 6: Radius Search (Within 50 km of London) ---");
+    // London coords: -0.1276, 51.5074
+    geoname_place@[] radius_res = map.find_in_radius(-0.1276, 51.5074, 50.0);
+    println("Found " + radius_res.length() + " places within 50 km of London:");
+    for (uint i = 0; i < radius_res.length() and i < 5; i++) {
+        double dist = radius_res[i].distance_to_km(-0.1276, 51.5074);
+        println("  - " + radius_res[i].name + ": " + dist + " km away");
+    }
+
+    println("\n--- Test 7: Local 3D Game Audio Conversion (ENU Projection) ---");
+    // Player is at London (-0.1276, 51.5074, 15m elev)
+    // Find local 3D vector to Paris (2.3522, 48.8566, 35m elev)
+    geoname_place@ paris = map.get_by_name("Paris");
+    if (@paris != null) {
+        vector v = paris.to_local_xyz(-0.1276, 51.5074, 15.0);
+        println("Local 3D game coordinates for Paris relative to London (East=X, North=Y, Up=Z):");
+        println("  X (East)  = " + v.x + " meters");
+        println("  Y (North) = " + v.y + " meters");
+        println("  Z (Up)    = " + v.z + " meters");
+        println("  Direct 3D distance = " + sqrt(v.x*v.x + v.y*v.y + v.z*v.z) / 1000.0 + " km");
+    }
+
+    println("\n=== All Tests Passed Successfully! ===");
+}

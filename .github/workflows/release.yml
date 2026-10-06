@@ -1,0 +1,198 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-desktop:
+    name: Build Desktop (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            output_dir: rust_core/target/release
+            binary_name: nvgt_geoname_map.dll
+            artifact_name: windows-x64
+
+          - name: Linux x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            output_dir: rust_core/target/release
+            binary_name: libnvgt_geoname_map.so
+            artifact_name: linux-x64
+
+          - name: macOS Universal
+            os: macos-latest
+            target: universal
+            output_dir: rust_core/target/release
+            binary_name: libnvgt_geoname_map.dylib
+            artifact_name: macos-universal
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build macOS Universal Binary
+        if: matrix.target == 'universal'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cd rust_core
+          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          mkdir -p target/release
+          lipo -create -output target/release/libnvgt_geoname_map.dylib \
+            target/x86_64-apple-darwin/release/libnvgt_geoname_map.dylib \
+            target/aarch64-apple-darwin/release/libnvgt_geoname_map.dylib
+
+      - name: Build Desktop Binary
+        if: matrix.target != 'universal'
+        run: |
+          cd rust_core
+          cargo build --release
+
+      - name: Upload Desktop Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.output_dir }}/${{ matrix.binary_name }}
+
+  build-android:
+    name: Build Android (ARM64, ARMv7, x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Set up NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Build Android Shared Libraries
+        run: |
+          cd rust_core
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o ../android_libs build --release
+
+      - name: Upload Android Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-libs
+          path: android_libs/
+
+  create-release:
+    name: Package and Publish Release
+    needs: [build-desktop, build-android]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/windows
+
+      - name: Download Linux Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-x64
+          path: dist/linux
+
+      - name: Download macOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-universal
+          path: dist/macos
+
+      - name: Download Android Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: android-libs
+          path: dist/android
+
+      - name: Package Archives
+        run: |
+          mkdir -p release_assets
+
+          # Windows
+          cp geoname_map.nvgt LICENSE README.md dist/windows/
+          cd dist/windows && zip -r ../../release_assets/nvgt_geoname_map-windows-x64.zip . && cd ../..
+
+          # Linux
+          cp geoname_map.nvgt LICENSE README.md dist/linux/
+          cd dist/linux && zip -r ../../release_assets/nvgt_geoname_map-linux-x64.zip . && cd ../..
+
+          # macOS
+          cp geoname_map.nvgt LICENSE README.md dist/macos/
+          cd dist/macos && zip -r ../../release_assets/nvgt_geoname_map-macos-universal.zip . && cd ../..
+
+          # Android
+          cp geoname_map.nvgt LICENSE README.md dist/android/
+          cd dist/android && zip -r ../../release_assets/nvgt_geoname_map-android.zip . && cd ../..
+
+          # All Platforms Bundle
+          mkdir -p dist/all/windows dist/all/linux dist/all/macos dist/all/android
+          cp dist/windows/nvgt_geoname_map.dll dist/all/windows/
+          cp dist/linux/libnvgt_geoname_map.so dist/all/linux/
+          cp dist/macos/libnvgt_geoname_map.dylib dist/all/macos/
+          cp -r dist/android/* dist/all/android/
+          cp geoname_map.nvgt LICENSE README.md dist/all/
+          cd dist/all && zip -r ../../release_assets/nvgt_geoname_map-all-platforms.zip . && cd ../..
+
+      - name: Determine Release Tag
+        id: release_info
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
+            echo "tag=$TAG_NAME" >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_info.outputs.tag }}
+          name: "NVGT GeoNames Map (${{ steps.release_info.outputs.tag }})"
+          prerelease: ${{ steps.release_info.outputs.is_prerelease == 'true' }}
+          files: release_assets/*
+          body: |
+            ## Automated Release: ${{ steps.release_info.outputs.tag }}
+
+            High-performance, 100% offline, zero-configuration geographic map engine for NVGT with embedded global dataset (239,135 locations).
+
+            ### Included Packages:
+            - **`nvgt_geoname_map-windows-x64.zip`**: Windows 64-bit DLL + AngelScript wrapper
+            - **`nvgt_geoname_map-android.zip`**: Android native libraries (`arm64-v8a`, `armeabi-v7a`, `x86_64`)
+            - **`nvgt_geoname_map-linux-x64.zip`**: Linux 64-bit shared library
+            - **`nvgt_geoname_map-macos-universal.zip`**: macOS Universal binary (Intel + Apple Silicon)
+            - **`nvgt_geoname_map-all-platforms.zip`**: All precompiled binaries for every platform
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

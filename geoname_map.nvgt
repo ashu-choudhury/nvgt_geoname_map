@@ -1,0 +1,300 @@
+/*
+ * geoname_map.nvgt - High-Performance Offline Geographic Map Library for NVGT
+ * 
+ * Powered by high-speed native Rust engine (nvgt_geoname_map.dll)
+ * and compact packed binary data (geonames_world.dat).
+ * 
+ * Features:
+ * - 239,000+ Earth locations (Countries, Oceans, Seas, Cities, Towns, Villages, Mountains, Lakes, Rivers)
+ * - Ultra-fast startup: Binary data loaded in ~50 milliseconds
+ * - Sub-millisecond queries powered by Rust spatial index
+ * - True 3D Coordinates: Longitude (X), Latitude (Y), Elevation/Altitude (Z)
+ * - Spherical distance (km/m), compass bearing & directions, and local Cartesian 3D audio projection (ENU)
+ */
+
+// Category Constants
+const int GEONAME_CAT_ANY      = 0;
+const int GEONAME_CAT_COUNTRY  = 1;
+const int GEONAME_CAT_OCEAN    = 2;
+const int GEONAME_CAT_SEA      = 3;
+const int GEONAME_CAT_CITY     = 4;
+const int GEONAME_CAT_TOWN     = 5;
+const int GEONAME_CAT_VILLAGE  = 6;
+const int GEONAME_CAT_MOUNTAIN = 7;
+const int GEONAME_CAT_LAKE     = 8;
+const int GEONAME_CAT_RIVER    = 9;
+
+const double EARTH_RADIUS_KM = 6371.0088;
+const double EARTH_RADIUS_M  = 6371008.8;
+const double DEG_TO_RAD      = 0.017453292519943295;
+const double RAD_TO_DEG      = 57.29577951308232;
+
+class geoname_place {
+    string name;
+    int category;
+    string country;   // 2-letter ISO code
+    double x;          // Longitude (-180.0 to +180.0)
+    double y;          // Latitude (-90.0 to +90.0)
+    double z;          // Elevation / DEM in meters above sea level
+    int population;
+    double cached_distance_km;
+    double cached_bearing;
+    string cached_direction;
+
+    geoname_place() {
+        this.category = 0;
+        this.x = 0;
+        this.y = 0;
+        this.z = 0;
+        this.population = 0;
+        this.cached_distance_km = -1.0;
+        this.cached_bearing = -1.0;
+        this.cached_direction = "";
+    }
+
+    geoname_place(const string& in name, int category, const string& in country, double lon, double lat, double elev, int pop) {
+        this.name = name;
+        this.category = category;
+        this.country = country;
+        this.x = lon;
+        this.y = lat;
+        this.z = elev;
+        this.population = pop;
+        this.cached_distance_km = -1.0;
+        this.cached_bearing = -1.0;
+        this.cached_direction = "";
+    }
+
+    string get_category_name() const {
+        switch (this.category) {
+            case GEONAME_CAT_COUNTRY:  return "country";
+            case GEONAME_CAT_OCEAN:    return "ocean";
+            case GEONAME_CAT_SEA:      return "sea";
+            case GEONAME_CAT_CITY:     return "city";
+            case GEONAME_CAT_TOWN:     return "town";
+            case GEONAME_CAT_VILLAGE:  return "village";
+            case GEONAME_CAT_MOUNTAIN: return "mountain";
+            case GEONAME_CAT_LAKE:     return "lake";
+            case GEONAME_CAT_RIVER:    return "river";
+            default:                   return "unknown";
+        }
+    }
+
+    // Great-circle spherical distance using Haversine formula (in kilometers)
+    double distance_to_km(double target_lon, double target_lat) const {
+        double dlat = (target_lat - this.y) * DEG_TO_RAD;
+        double dlon = (target_lon - this.x) * DEG_TO_RAD;
+        double lat1 = this.y * DEG_TO_RAD;
+        double lat2 = target_lat * DEG_TO_RAD;
+
+        double sin_dlat = sin(dlat * 0.5);
+        double sin_dlon = sin(dlon * 0.5);
+
+        double a = sin_dlat * sin_dlat + cos(lat1) * cos(lat2) * sin_dlon * sin_dlon;
+        if (a > 1.0) a = 1.0;
+        double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
+        return EARTH_RADIUS_KM * c;
+    }
+
+    // Distance in meters
+    double distance_to_m(double target_lon, double target_lat) const {
+        return this.distance_to_km(target_lon, target_lat) * 1000.0;
+    }
+
+    double distance_to(geoname_place@ other) const {
+        if (@other == null) return 0.0;
+        return this.distance_to_km(other.x, other.y);
+    }
+
+    // Compass bearing in degrees (0 = North, 90 = East, 180 = South, 270 = West)
+    double bearing_to(double target_lon, double target_lat) const {
+        double lat1 = this.y * DEG_TO_RAD;
+        double lat2 = target_lat * DEG_TO_RAD;
+        double dlon = (target_lon - this.x) * DEG_TO_RAD;
+
+        double y_comp = sin(dlon) * cos(lat2);
+        double x_comp = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dlon);
+        double b = atan2(y_comp, x_comp) * RAD_TO_DEG;
+        while (b < 0.0) b += 360.0;
+        while (b >= 360.0) b -= 360.0;
+        return b;
+    }
+
+    string compass_direction_to(double target_lon, double target_lat) const {
+        double b = this.bearing_to(target_lon, target_lat);
+        if (b >= 337.5 or b < 22.5)   return "North";
+        if (b >= 22.5 and b < 67.5)   return "North-East";
+        if (b >= 67.5 and b < 112.5)  return "East";
+        if (b >= 112.5 and b < 157.5) return "South-East";
+        if (b >= 157.5 and b < 202.5) return "South";
+        if (b >= 202.5 and b < 247.5) return "South-West";
+        if (b >= 247.5 and b < 292.5) return "West";
+        return "North-West";
+    }
+
+    // Converts to local Cartesian 3D coordinates (East=X, North=Y, Up=Z in meters)
+    // relative to a world anchor / player reference coordinate
+    vector to_local_xyz(double origin_lon, double origin_lat, double origin_alt = 0.0) const {
+        double dlon_rad = (this.x - origin_lon) * DEG_TO_RAD;
+        double dlat_rad = (this.y - origin_lat) * DEG_TO_RAD;
+        double origin_lat_rad = origin_lat * DEG_TO_RAD;
+
+        double local_x = dlon_rad * EARTH_RADIUS_M * cos(origin_lat_rad); // East
+        double local_y = dlat_rad * EARTH_RADIUS_M;                      // North
+        double local_z = this.z - origin_alt;                             // Up / Elevation
+
+        return vector(float(local_x), float(local_y), float(local_z));
+    }
+}
+
+class geoname_map {
+    private library rust_lib;
+    private bool is_loaded;
+
+    geoname_map() {
+        this.is_loaded = false;
+    }
+
+    bool get_loaded() const {
+        return this.is_loaded;
+    }
+
+    // Resolves a file to its canonical absolute path
+    private string resolve_path(const string& in filename) const {
+        if (file_exists(filename)) {
+            spec::path p(filename);
+            p.make_absolute();
+            return p.to_string();
+        }
+        return filename;
+    }
+
+    // Parse a tab-separated row string returned by Rust
+    private geoname_place@ parse_place_row(const string& in row) const {
+        if (row.length() < 7) return null;
+        string[]@ parts = row.split("\t");
+        if (parts.length() < 7) return null;
+
+        geoname_place p;
+        p.name = parts[0];
+        p.category = int(parse_float(parts[1]));
+        p.country = parts[2];
+        p.x = parse_double(parts[3]);
+        p.y = parse_double(parts[4]);
+        p.z = parse_double(parts[5]);
+        p.population = int(parse_float(parts[6]));
+
+        if (parts.length() >= 10) {
+            p.cached_distance_km = parse_double(parts[7]);
+            p.cached_bearing = parse_double(parts[8]);
+            p.cached_direction = parts[9];
+        }
+
+        return p;
+    }
+
+    private geoname_place@[] parse_place_list(const string& in multiline_str) const {
+        geoname_place@[] results;
+        if (multiline_str.length() == 0) return results;
+        string[]@ lines = multiline_str.split("\n");
+        results.reserve(lines.length());
+        for (uint i = 0; i < lines.length(); i++) {
+            geoname_place@ p = this.parse_place_row(lines[i]);
+            if (@p != null) {
+                results.insert_last(p);
+            }
+        }
+        return results;
+    }
+
+    // Initialize the geographic engine (data is 100% embedded in the binary!)
+    bool load(const string& in dll_path = "") {
+        if (this.is_loaded) {
+            return true;
+        }
+
+        // 1. Locate and load the native engine binary (.dll on Windows, .so on Android/Linux)
+        string target_dll = dll_path;
+        if (target_dll.length() == 0) {
+            string[] candidates = {
+                "nvgt_geoname_map.dll",
+                "libnvgt_geoname_map.so",
+                "rust_core/target/release/nvgt_geoname_map.dll"
+            };
+            for (uint i = 0; i < candidates.length(); i++) {
+                if (file_exists(candidates[i])) {
+                    target_dll = candidates[i];
+                    break;
+                }
+            }
+        }
+        if (target_dll.length() == 0) target_dll = "nvgt_geoname_map.dll";
+        string abs_dll = this.resolve_path(target_dll);
+
+        if (!this.rust_lib.load(abs_dll)) {
+            return false;
+        }
+
+        // 2. Initialize in Rust (uses the embedded binary data automatically)
+        var@ init_var = this.rust_lib.call("bool geo_init(char*)", "");
+        bool ok = bool(init_var);
+        if (!ok) {
+            this.rust_lib.unload();
+            return false;
+        }
+
+        this.is_loaded = true;
+        return true;
+    }
+
+    void unload() {
+        if (this.is_loaded) {
+            this.rust_lib.unload();
+            this.is_loaded = false;
+        }
+    }
+
+    // Total locations loaded in Rust
+    uint count() {
+        if (!this.is_loaded) return 0;
+        var@ v = this.rust_lib.call("uint32 geo_count()");
+        return uint(v);
+    }
+
+    // Reverse geocoding: Find nearest place from coordinates
+    geoname_place@ find_nearest(double lon, double lat, int category_filter = GEONAME_CAT_ANY) {
+        if (!this.is_loaded) return null;
+        var@ v = this.rust_lib.call("char* geo_find_nearest(double, double, int)", lon, lat, category_filter);
+        string res = string(v);
+        return this.parse_place_row(res);
+    }
+
+    // Alias for find_nearest with XYZ arguments
+    geoname_place@ find_nearest_xyz(double x, double y, double z = 0.0, int category_filter = GEONAME_CAT_ANY) {
+        return this.find_nearest(x, y, category_filter);
+    }
+
+    // Exact place name lookup, optionally filtered by country code (e.g. "FR", "US", "NP")
+    geoname_place@ get_by_name(const string& in place_name, const string& in country_code = "") {
+        if (!this.is_loaded) return null;
+        var@ v = this.rust_lib.call("char* geo_get_by_name(char*, char*)", place_name, country_code);
+        string res = string(v);
+        return this.parse_place_row(res);
+    }
+
+    // Substring search across all places in Rust
+    geoname_place@[] search(const string& in query, int category_filter = GEONAME_CAT_ANY, int max_results = 20) {
+        geoname_place@[] results;
+        if (!this.is_loaded) return results;
+        var@ v = this.rust_lib.call("char* geo_search(char*, int, int)", query, category_filter, max_results);
+        return this.parse_place_list(string(v));
+    }
+
+    // Find all places within radius (in kilometers)
+    geoname_place@[] find_in_radius(double lon, double lat, double radius_km, int category_filter = GEONAME_CAT_ANY, int max_results = 50) {
+        geoname_place@[] results;
+        if (!this.is_loaded) return results;
+        var@ v = this.rust_lib.call("char* geo_find_in_radius(double, double, double, int, int)", lon, lat, radius_km, category_filter, max_results);
+        return this.parse_place_list(string(v));
+    }
+}
